@@ -12,7 +12,7 @@
                             <field name="fund_name"/>
                             <field name="fund_code"/>
                             <field name="fund_amount" widget="monetary"/>
-                            <field name="custodian"/>
+                            <field name="custodian_id"/>
                             <field name="account"/>
                         </group>
                         <group>

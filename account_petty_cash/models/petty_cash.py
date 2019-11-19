@@ -19,35 +19,24 @@
 #
 #
 
-from openerp import api, exceptions, fields, models
-from openerp.addons.decimal_precision import decimal_precision as dp
-from openerp.tools import float_compare
-from openerp.tools.translate import _
+from odoo import api, exceptions, fields, models
+from odoo.tools import float_compare
+from odoo.tools.translate import _
 
-PETTYCASH_STATE = [
-    ('draft', 'Draft'),
-    ('open', 'Open'),
-    ('closed', 'Closed'),
-]
+PETTYCASH_STATE = [("draft", "Draft"), ("open", "Open"), ("closed", "Closed")]
 
 
-class AccountVoucher(models.Model):
+class AccountInvoice(models.Model):
 
-    _inherit = 'account.voucher'
+    _inherit = "account.invoice"
 
-    petty_cash_fund = fields.Many2one('account.pettycash.fund')
-
-    @api.multi
-    def button_cancel_voucher(self):
-
-        for voucher in self:
-            voucher.cancel_voucher()
+    petty_id = fields.Many2one("account.pettycash.fund")
 
 
 class PettyCash(models.Model):
 
-    _name = 'account.pettycash.fund'
-    _description = 'Petty Cash Fund'
+    _name = "account.pettycash.fund"
+    _description = "Petty Cash Fund"
 
     @api.multi
     def _balance(self):
@@ -57,55 +46,45 @@ class PettyCash(models.Model):
         #
         for fund in self:
             balance = 0.0
-            for move in fund.journal_entries:
-                for line in move.line_id:
-                    if line.account_id.id \
-                        not in [fund.journal.default_debit_account_id.id,
-                                fund.journal.default_credit_account_id.id]:
-                        continue
-                    balance += (line.debit - line.credit)
-                for v in fund.vouchers:
-                    for l in v.line_dr_ids:
-                        balance -= l.amount
-            fund.balance = balance
+            for inv in fund.invoice_ids:
+                balance = inv.amount_total
+            self.balance = balance
 
     @api.multi
     def _get_entries(self):
 
-        AccountMove = self.env['account.move']
+        AccountMove = self.env["account.move"]
 
         for fund in self:
-            moves = AccountMove.search([('journal_id', '=', fund.journal.id)])
+            moves = AccountMove.search([("journal_id", "=", fund.journal.id)])
             fund.journal_entries = [(6, 0, [m.id for m in moves])]
 
     # Fields
     #
-    name = fields.Char(required=True, readonly=True,
-                       states={'draft': [('readonly', False)]})
-    custodian = fields.Many2one('res.users', required=True, readonly=True,
-                                states={'draft': [('readonly', False)]})
-    custodian_partner = fields.Many2one(
-        'res.partner', related='custodian.partner_id', readonly=True)
-    journal = fields.Many2one('account.journal', required=True)
-    amount = fields.Float(string='Fund Amount', readonly=True,
-                          digits_compute=dp.get_precision('Product Price'),
-                          states={'draft': [('readonly', False)]})
-    balance = fields.Float(string='Balance', compute=_balance, readonly=True,
-                           digits_compute=dp.get_precision('Product Price'))
-    state = fields.Selection(selection=PETTYCASH_STATE, default='draft')
+    STATES = {"draft": [("readonly", False)]}
+
+    name = fields.Char(required=True, readonly=True, states=STATES)
+    custodian_partner_id = fields.Many2one("res.partner", readonly=True, states=STATES)
+    journal_id = fields.Many2one(
+        "account.journal", string="Caja", domain=[("type", "=", "cash")], required=True
+    )
+    amount = fields.Monetary(string="Fund Amount", readonly=True, states=STATES)
+    balance = fields.Monetary(string="Balance", compute=_balance, readonly=True)
+    state = fields.Selection(selection=PETTYCASH_STATE, default="draft")
     active = fields.Boolean(default=True)
-    company = fields.Many2one(
-        'res.company',
-        default=lambda self:
-        self.env['res.company']._company_default_get('account.pettycash.fund'))
-    vouchers = fields.One2many(
-        'account.voucher', 'petty_cash_fund', readonly=True,
-        domain=[('state', 'not in', ['cancel', 'posted'])])
-    vouchers_history = fields.One2many(
-        'account.voucher', 'petty_cash_fund', readonly=True,
-        domain=[('state', 'in', ['cancel', 'posted'])])
-    journal_entries = fields.Many2many(
-        'account.move', compute=_get_entries, readonly=True)
+    company_id = fields.Many2one(
+        "res.company",
+        default=lambda self: self.env["res.company"]._company_default_get(
+            "account.pettycash.fund"
+        ),
+    )
+    currency_id = fields.Many2one(
+        "res.currency",
+        related="company_id.currency_id",
+        string="Company Currency",
+        readonly=True,
+    )
+    invoice_ids = fields.One2many("account.invoice", "petty_id", string="Facturas")
 
     @api.model
     def check_is_in_group(self, name, name_desc, action_desc):
@@ -122,51 +101,65 @@ class PettyCash(models.Model):
 
         # Only the Finance manager should be allowed to proceed beyond
         # this point.
-        self.check_is_in_group('account.group_account_manager',
-                               'Finance Manager',
-                               _("create a journal sequence for a "
-                                 "petty cash fund"))
+        self.check_is_in_group(
+            "account.group_account_manager",
+            "Finance Manager",
+            _("create a journal sequence for a " "petty cash fund"),
+        )
 
-        SeqObj = self.env['ir.sequence']
-        seq = SeqObj.sudo().create({
-            'name': fund_name,
-            'code': 'pay_voucher',
-            'prefix': fund_code + "/%(y)s/",
-            'padding': 2,
-        })
+        SeqObj = self.env["ir.sequence"]
+        seq = SeqObj.sudo().create(
+            {
+                "name": fund_name,
+                "code": "pay_voucher",
+                "prefix": fund_code + "/%(y)s/",
+                "padding": 2,
+            }
+        )
         return seq
 
     @api.model
-    def create_journal(self, fund_name, fund_code, custodian_id, seq_id,
-                       default_credit_acct_id, default_debit_acct_id):
+    def create_journal(
+        self,
+        fund_name,
+        fund_code,
+        custodian_id,
+        seq_id,
+        default_credit_acct_id,
+        default_debit_acct_id,
+    ):
 
-        JrnObj = self.env['account.journal']
-        jrnl = JrnObj.create({
-            'name': fund_name,
-            'code': fund_code,
-            'type': 'cash',
-            'default_credit_account_id': default_credit_acct_id,
-            'default_debit_account_id': default_debit_acct_id,
-            'user_id': custodian_id,
-            'sequence_id': seq_id,
-            'update_posted': True,
-        })
+        JrnObj = self.env["account.journal"]
+        jrnl = JrnObj.create(
+            {
+                "name": fund_name,
+                "code": fund_code,
+                "type": "cash",
+                "default_credit_account_id": default_credit_acct_id,
+                "default_debit_account_id": default_debit_acct_id,
+                "user_id": custodian_id,
+                "sequence_id": seq_id,
+                "update_posted": True,
+            }
+        )
         return jrnl
 
     @api.model
-    def create_fund(self, fund_amount, fund_name, fund_code, custodian,
-                    account):
+    def create_fund(self, fund_amount, fund_name, fund_code, custodian, account):
 
         seq = self.create_journal_sequence(fund_name, fund_code)
-        jrn = self.create_journal(fund_name, fund_code, custodian.id, seq.id,
-                                  account.id, account.id)
-        fnd = self.create({
-            'name': fund_name,
-            'custodian': custodian.id,
-            'amount': fund_amount,
-            'journal': jrn.id,
-            'state': 'open',
-        })
+        jrn = self.create_journal(
+            fund_name, fund_code, custodian.id, seq.id, account.id, account.id
+        )
+        fnd = self.create(
+            {
+                "name": fund_name,
+                "custodian": custodian.id,
+                "amount": fund_amount,
+                "journal": jrn.id,
+                "state": "open",
+            }
+        )
 
         return fnd
 
@@ -175,42 +168,48 @@ class PettyCash(models.Model):
 
         # Only the Finance manager should be allowed to proceed beyond
         # this point.
-        self.check_is_in_group('account.group_account_manager',
-                               'Finance Manager',
-                               _("close a petty cash fund"))
+        self.check_is_in_group(
+            "account.group_account_manager",
+            "Finance Manager",
+            _("close a petty cash fund"),
+        )
 
         for fund in self:
             if fund.vouchers and len(fund.vouchers) > 0:
                 raise exceptions.ValidationError(
-                    _("Petty Cash fund (%s) has un-reconciled vouchers" %
-                      (fund.name))
+                    _("Petty Cash fund (%s) has un-reconciled vouchers" % (fund.name))
                 )
 
             desc = _("Close Petty Cash fund (%s)" % (fund.name))
             fund.create_receivable_journal_entry(
-                fund, receivable_account.id, date, fund.amount, desc)
+                fund, receivable_account.id, date, fund.amount, desc
+            )
 
-            fund.write({'amount': 0.0, 'state': 'closed', 'active': False})
+            fund.write({"amount": 0.0, "state": "closed", "active": False})
 
     @api.multi
     def reopen_fund(self):
 
         # Only the Finance manager should be allowed to re-open a fund
-        self.check_is_in_group('account.group_account_manager',
-                               'Finance Manager',
-                               _("re-open a petty cash fund"))
+        self.check_is_in_group(
+            "account.group_account_manager",
+            "Finance Manager",
+            _("re-open a petty cash fund"),
+        )
 
         for fund in self:
-            fund.write({'state': 'open', 'active': True})
+            fund.write({"state": "open", "active": True})
 
     @api.multi
     def change_fund_amount(self, new_amount):
 
         # Only the Finance manager should be allowed to change the
         # amount of the fund.
-        self.check_is_in_group('account.group_account_manager',
-                               'Finance Manager',
-                               _("change the amount of a petty cash fund"))
+        self.check_is_in_group(
+            "account.group_account_manager",
+            "Finance Manager",
+            _("change the amount of a petty cash fund"),
+        )
 
         for fund in self:
             # If this is a decrease in funds and there are unreconciled
@@ -218,76 +217,73 @@ class PettyCash(models.Model):
             diff = float_compare(new_amount, fund.amount, precision_digits=2)
             if diff == -1 and fund.vouchers and len(fund.vouchers) > 0:
                 raise exceptions.ValidationError(
-                    _("Petty Cash fund (%s) has unreconciled vouchers" %
-                      (fund.name))
+                    _("Petty Cash fund (%s) has unreconciled vouchers" % (fund.name))
                 )
             fund.amount = new_amount
 
     @api.model
-    def create_journal_entry_common(
-            self, _type, fnd, account_id, date, amount, desc):
+    def create_journal_entry_common(self, _type, fnd, account_id, date, amount, desc):
 
-        AccountMove = self.env['account.move']
+        AccountMove = self.env["account.move"]
 
         # Set debit and credit accounts according to type of entry. Default
         # to payable.
         debit_account = fnd.journal.default_debit_account_id.id
         credit_account = account_id
-        if _type == 'receivable':
+        if _type == "receivable":
             debit_account = account_id
             credit_account = fnd.journal.default_credit_account_id.id
 
         # First, create the move
-        move_vals = AccountMove.account_move_prepare(
-            fnd.journal.id, date=date)
-        move_vals.update({'narration': desc})
+        move_vals = AccountMove.account_move_prepare(fnd.journal.id, date=date)
+        move_vals.update({"narration": desc})
 
         # Create the first line
         move_line1_vals = {
-            'name': desc,
-            'debit': amount,
-            'credit': 0.0,
-            'account_id': debit_account,
-            'journal_id': fnd.journal.id,
-            'period_id': move_vals['period_id'],
-            'partner_id': fnd.custodian_partner.id,
-            'date': date,
+            "name": desc,
+            "debit": amount,
+            "credit": 0.0,
+            "account_id": debit_account,
+            "journal_id": fnd.journal.id,
+            "period_id": move_vals["period_id"],
+            "partner_id": fnd.custodian_partner.id,
+            "date": date,
         }
 
         # Create the second line
         move_line2_vals = {
-            'name': desc,
-            'debit': 0.0,
-            'credit': amount,
-            'journal_id': fnd.journal.id,
-            'account_id': credit_account,
-            'period_id': move_vals['period_id'],
-            'partner_id': fnd.custodian_partner.id,
-            'quantity': 1,
-            'date': date,
-            'date_maturity': date,
+            "name": desc,
+            "debit": 0.0,
+            "credit": amount,
+            "journal_id": fnd.journal.id,
+            "account_id": credit_account,
+            "period_id": move_vals["period_id"],
+            "partner_id": fnd.custodian_partner.id,
+            "quantity": 1,
+            "date": date,
+            "date_maturity": date,
         }
 
         # Update the journal entry and post
         #
-        move_vals.update({
-            'line_id': [(0, 0, move_line2_vals), (0, 0, move_line1_vals)]
-        })
+        move_vals.update(
+            {"line_id": [(0, 0, move_line2_vals), (0, 0, move_line1_vals)]}
+        )
         move = AccountMove.create(move_vals)
         move.button_validate()
 
         return move
 
     @api.model
-    def create_payable_journal_entry(
-            self, fnd, account_id, date, amount, desc):
+    def create_payable_journal_entry(self, fnd, account_id, date, amount, desc):
 
         return self.create_journal_entry_common(
-            'payable', fnd, account_id, date, amount, desc)
+            "payable", fnd, account_id, date, amount, desc
+        )
 
     @api.model
-    def create_receivable_journal_entry(
-            self, fnd, account_id, date, amount, desc):
+    def create_receivable_journal_entry(self, fnd, account_id, date, amount, desc):
 
         return self.create_journal_entry_common(
-            'receivable', fnd, account_id, date, amount, desc)
+            "receivable", fnd, account_id, date, amount, desc
+        )
